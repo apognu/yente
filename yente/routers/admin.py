@@ -1,15 +1,20 @@
-from typing import List
-from fastapi import APIRouter, Depends, Query
-from fastapi import HTTPException
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.openapi.docs import get_redoc_html
 from fastapi.responses import FileResponse, HTMLResponse
 from normality import squash_spaces
 
 from yente import settings
-from yente.logs import get_logger
 from yente.data import get_catalog
-from yente.data.common import ErrorResponse, StatusResponse
-from yente.data.common import DataCatalogModel, AlgorithmResponse, Algorithm
+from yente.data.common import (
+    Algorithm,
+    AlgorithmResponse,
+    DataCatalogModel,
+    ErrorResponse,
+    StatusResponse,
+)
+from yente.logs import get_logger
 from yente.provider import SearchProvider, get_provider
 from yente.routers.util import ENABLED_ALGORITHMS
 from yente.search.indexer import update_index, update_index_threaded
@@ -138,6 +143,7 @@ async def algorithms() -> AlgorithmResponse:
 async def force_update(
     token: str = Query("", title="Update token for authentication"),
     sync: bool = Query(False, title="Wait until indexing is complete"),
+    external_id: Optional[str] = Query(None, title="External operation ID"),
 ) -> StatusResponse:
     """Force the index to be re-generated. Works only if the update token is provided
     (serves as an API key, and can be set in the container environment)."""
@@ -149,7 +155,7 @@ async def force_update(
     ):
         raise HTTPException(403, detail="Invalid token.")
     if sync:
-        await update_index(force=True)
+        await update_index(force=True, external_id=external_id)
     else:
         update_index_threaded(force=True)
     return StatusResponse(status="ok")

@@ -26,6 +26,9 @@ def datetime_to_millis_timestamp(dt: datetime) -> int:
 
 
 class AuditLogEventType(StrEnum):
+    INDEXING_OPERATION_STARTED = "indexing_started"
+    INDEXING_OPERATION_COMPLETED = "indexing_completed"
+
     # REINDEX_STARTED gets written as a lock, and is refreshed periodically.
     REINDEX_STARTED = "reindex_started"
     # REINDEX_COMPLETED or REINDEX_FAILED release the lock.
@@ -71,6 +74,7 @@ async def log_audit_message(
     dataset: Optional[str] = None,
     dataset_version: Optional[str] = None,
     message: str,
+    external_id: Optional[str] = None,
 ) -> str:
     """Log an audit message and return the document ID.
 
@@ -97,6 +101,7 @@ async def log_audit_message(
                     "event_type": event_type,
                     "message": message,
                     "timestamp": timestamp,
+                    "external_id": external_id,
                 },
             }
         ]

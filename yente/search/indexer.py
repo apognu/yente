@@ -1,17 +1,27 @@
 import asyncio
 import threading
-from typing import Any, AsyncGenerator, AsyncIterable, Dict, List, Set
-from followthemoney.exc import FollowTheMoneyException
+from typing import Any, AsyncGenerator, AsyncIterable, Dict, List, Optional, Set
+
 from followthemoney import registry
+from followthemoney.exc import FollowTheMoneyException
 
 from yente import settings
+from yente.data import get_catalog
+from yente.data.dataset import Dataset
+from yente.data.entity import Entity
 from yente.data.manifest import Catalog
+from yente.data.updater import DatasetUpdater
+from yente.data.util import (
+    entity_names,
+    expand_dates,
+    index_symbol,
+    is_matchable_symbol,
+)
 from yente.exc import YenteIndexError
 from yente.logs import get_logger
-from yente.data.entity import Entity
-from yente.data.dataset import Dataset
-from yente.data import get_catalog
-from yente.data.updater import DatasetUpdater
+from yente.provider import SearchProvider, with_provider
+from yente.search import audit_log
+from yente.search.audit_log import AuditLogEventType, get_audit_log_index_name
 from yente.search.lock import (
     LockSession,
     acquire_lock,
@@ -19,26 +29,19 @@ from yente.search.lock import (
     refresh_lock,
     release_lock,
 )
-from yente.search import audit_log
-from yente.search.audit_log import get_audit_log_index_name, AuditLogEventType
 from yente.search.mapping import (
+    INDEX_SETTINGS,
     NAME_PART_FIELD,
     NAME_PHONETIC_FIELD,
     NAME_SYMBOLS_FIELD,
     make_entity_mapping,
-    INDEX_SETTINGS,
 )
-from yente.provider import SearchProvider, with_provider
 from yente.search.versions import (
-    build_index_name_prefix,
-    parse_index_name,
     build_index_name,
+    build_index_name_prefix,
     get_system_version,
+    parse_index_name,
 )
-from yente.data.util import expand_dates
-from yente.data.util import index_symbol, is_matchable_symbol
-from yente.data.util import entity_names
-
 
 log = get_logger(__name__)
 lock = threading.Lock()
@@ -146,7 +149,11 @@ async def get_index_version(provider: SearchProvider, dataset: Dataset) -> str |
 
 
 async def index_entities(
-    provider: SearchProvider, dataset: Dataset, force: bool, lock_session: LockSession
+    provider: SearchProvider,
+    dataset: Dataset,
+    force: bool,
+    lock_session: LockSession,
+    external_id: Optional[str] = None,
 ) -> None:
     """Index entities in a particular dataset, with versioning of the index."""
     alias = settings.ENTITY_INDEX
@@ -180,6 +187,7 @@ async def index_entities(
         dataset=dataset.name,
         dataset_version=updater.target_version,
         message=f"{'Incremental' if is_partial_reindex else 'Full'} reindex of {dataset.name} to {next_index} started",
+        external_id=external_id,
     )
 
     if is_partial_reindex:
@@ -223,6 +231,7 @@ async def index_entities(
             dataset=dataset.name,
             dataset_version=updater.target_version,
             message=f"{'Incremental' if is_partial_reindex else 'Full'} reindex of {dataset.name} to {next_index} completed",
+            external_id=external_id,
         )
 
     except (YenteIndexError, Exception) as exc:
@@ -239,6 +248,7 @@ async def index_entities(
             dataset=dataset.name,
             dataset_version=updater.target_version,
             message=f"Failed to index entities to {next_index}: {detail}",
+            external_id=external_id,
         )
 
         aliases = await provider.get_alias_indices(alias)
@@ -250,7 +260,11 @@ async def index_entities(
             # indexing failed
             log.warn("Retrying with full reindex", dataset=dataset.name)
             return await index_entities(
-                provider, dataset, force=True, lock_session=lock_session
+                provider,
+                dataset,
+                force=True,
+                lock_session=lock_session,
+                external_id=external_id,
             )
         raise exc
 
@@ -269,11 +283,14 @@ async def index_entities(
         dataset=dataset.name,
         dataset_version=updater.target_version,
         message=f"Alias {alias} prefixed {dataset_prefix} now points to {next_index}",
+        external_id=external_id,
     )
     log.info("Index is now aliased to: %s" % alias, index=next_index)
 
 
-async def delete_old_indices(provider: SearchProvider, catalog: Catalog) -> None:
+async def delete_old_indices(
+    provider: SearchProvider, catalog: Catalog, external_id: Optional[str] = None
+) -> None:
     aliased = await provider.get_alias_indices(settings.ENTITY_INDEX)
     for index in await provider.get_all_indices():
         if not index.startswith(settings.ENTITY_INDEX):
@@ -292,6 +309,7 @@ async def delete_old_indices(provider: SearchProvider, catalog: Catalog) -> None
                 AuditLogEventType.CLEANUP_INDEX_DELETED,
                 index=index,
                 message=f"Deleting index {index} due to invalid name",
+                external_id=external_id,
             )
             await provider.delete_index(index)
             continue
@@ -305,6 +323,7 @@ async def delete_old_indices(provider: SearchProvider, catalog: Catalog) -> None
                 dataset=index_info.dataset_name,
                 dataset_version=index_info.dataset_version,
                 message=f"Deleting orphaned index {index}",
+                external_id=external_id,
             )
             await provider.delete_index(index)
         dataset = catalog.get(index_info.dataset_name)
@@ -321,25 +340,40 @@ async def delete_old_indices(provider: SearchProvider, catalog: Catalog) -> None
                 dataset=index_info.dataset_name,
                 dataset_version=index_info.dataset_version,
                 message=f"Deleting index {index} due to non-scope dataset",
+                external_id=external_id,
             )
             await provider.delete_index(index)
 
 
-async def update_index(force: bool = False) -> None:
+async def update_index(force: bool = False, external_id: Optional[str] = None) -> None:
     """Reindex all datasets if there is a new version of their data contenst available,
     or create an initial version of the index from scratch."""
     async with with_provider() as provider:
         catalog = await get_catalog()
         log.info("Index update check")
-        lock_session = await acquire_lock(provider)
+        lock_session = await acquire_lock(provider, external_id=external_id)
         if not lock_session:
             log.warning("Failed to acquire lock, skipping index update")
             return
         try:
+            await audit_log.log_audit_message(
+                provider,
+                AuditLogEventType.INDEXING_OPERATION_STARTED,
+                index="",
+                dataset="",
+                dataset_version="",
+                message="Indexing operation started",
+                external_id=external_id,
+            )
+
             for dataset in catalog.datasets:
                 with lock:
                     await index_entities(
-                        provider, dataset, force=force, lock_session=lock_session
+                        provider,
+                        dataset,
+                        force=force,
+                        lock_session=lock_session,
+                        external_id=external_id,
                     )
 
             await delete_old_indices(provider, catalog)
@@ -349,12 +383,24 @@ async def update_index(force: bool = False) -> None:
             # because the index cleanup can delete the index that another instance
             # is currently indexing to if not done in the locked section!
             await release_lock(provider, lock_session)
+            
+            await audit_log.log_audit_message(
+                provider,
+                AuditLogEventType.INDEXING_OPERATION_COMPLETED,
+                index="",
+                dataset="",
+                dataset_version="",
+                message="Indexing operation completed",
+                external_id=external_id,
+            )
 
 
-def update_index_threaded(force: bool = False) -> None:
+def update_index_threaded(
+    force: bool = False, external_id: Optional[str] = None
+) -> None:
     async def update_in_thread() -> None:
         try:
-            await update_index(force=force)
+            await update_index(force=force, external_id=external_id)
         except (Exception, KeyboardInterrupt) as exc:
             log.exception("Index update error: %s" % exc)
 

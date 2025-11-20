@@ -1,11 +1,11 @@
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
-import uuid
+
 from yente import logs, settings
 from yente.exc import YenteIndexError
 from yente.provider.base import SearchProvider
-
 
 LOCK_EXPIRATION_TIME = timedelta(minutes=10)
 # We use a single lock document for everything, this could be expanded to support more granular lockin in the future.
@@ -64,7 +64,9 @@ def lock_is_active(hit: Dict[str, Any]) -> bool:
     )
 
 
-async def acquire_lock(provider: SearchProvider) -> Optional[LockSession]:
+async def acquire_lock(
+    provider: SearchProvider, external_id=None
+) -> Optional[LockSession]:
     """Acquire the global lock for the entire settings.INDEX_NAME prefix.
 
     Returns a LockSession if the lock was acquired, None if it was not.
@@ -96,6 +98,7 @@ async def acquire_lock(provider: SearchProvider) -> Optional[LockSession]:
                     "_source": {
                         "acquired_at": to_millis_timestamp(datetime.now()),
                         "lock_session_id": lock_session.id,
+                        "external_id": external_id,
                     },
                 }
             ]
@@ -143,6 +146,7 @@ async def acquire_lock(provider: SearchProvider) -> Optional[LockSession]:
             "doc": {
                 "acquired_at": to_millis_timestamp(datetime.now()),
                 "lock_session_id": lock_session.id,
+                "external_id": external_id,
             },
             # Uses seq_no and primary_term to prevent race conditions.
             # seq_no tracks the document's version across all shards, while primary_term ensures
