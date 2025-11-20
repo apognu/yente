@@ -15,8 +15,13 @@ from yente.data.common import (
     StatusResponse,
 )
 from yente.logs import get_logger
-from yente.provider import SearchProvider, get_provider
+from yente.provider import SearchProvider, get_provider, with_provider
 from yente.routers.util import ENABLED_ALGORITHMS
+from yente.search.audit_log import (
+    AuditLogFilters,
+    AuditLogMessage,
+    get_all_audit_log_messages,
+)
 from yente.search.indexer import update_index, update_index_threaded
 from yente.search.status import sync_dataset_versions
 
@@ -169,3 +174,22 @@ async def force_update(
 async def favicon() -> FileResponse:
     """Browser tab bar icon."""
     return FileResponse(settings.RESOURCES_PATH / "favicon.ico")
+
+
+@router.get("/audit", summary="Get audit logs", include_in_schema=False)
+async def audit_logs(
+    event_type: Optional[str] = Query(None, title="Filter by event type"),
+    external_id: Optional[str] = Query(None, title="Filter by external operation ID"),
+    size: int = Query(settings.MAX_RESULTS, title="How many entries to return"),
+) -> List[AuditLogMessage]:
+    async with with_provider() as provider:
+        filters = AuditLogFilters(
+            event_type=event_type,
+            external_id=external_id,
+        )
+
+        logs = await get_all_audit_log_messages(
+            provider, filters=filters, size=min(max(1, size), settings.MAX_RESULTS)
+        )
+
+        return logs

@@ -1,10 +1,10 @@
 from dataclasses import dataclass
-from enum import StrEnum
 from datetime import datetime, timezone
-from typing import Optional, List
+from enum import StrEnum
+from typing import List, Optional
+
 from yente import logs, settings
 from yente.provider.base import SearchProvider
-
 
 # Query the audit log using `yente audit-log` in the CLI
 
@@ -116,22 +116,44 @@ class AuditLogMessage:
     event_type: AuditLogEventType
     index: str
     message: str
+    external_id: Optional[str]
 
 
-async def get_all_audit_log_messages(provider: SearchProvider) -> List[AuditLogMessage]:
+@dataclass
+class AuditLogFilters:
+    event_type: Optional[str] = None
+    external_id: Optional[str] = None
+
+
+async def get_all_audit_log_messages(
+    provider: SearchProvider, filters: AuditLogFilters, size=settings.MAX_RESULTS
+) -> List[AuditLogMessage]:
     """Query all audit logs from the search provider, ordered by timestamp descending."""
+    terms = []
+
+    if filters.event_type:
+        terms.append({"term": {"event_type": {"value": filters.event_type}}})
+    if filters.external_id:
+        terms.append({"term": {"external_id": {"value": filters.external_id}}})
+
+    query = {"match_all": {}}
+    if len(terms) > 0:
+        query = {"bool": {"must": terms}}
+
     result = await provider.search(
         get_audit_log_index_name(),
-        query={"match_all": {}},
+        query=query,
         sort=[{"timestamp": {"order": "desc"}}],
-        size=settings.MAX_RESULTS,
+        size=size,
     )
+
     return [
         AuditLogMessage(
             timestamp=millis_timestamp_to_datetime(hit["_source"]["timestamp"]),
             event_type=AuditLogEventType(hit["_source"]["event_type"]),
             index=hit["_source"]["index"],
             message=hit["_source"]["message"],
+            external_id=hit["_source"].get("external_id", None),
         )
         for hit in result["hits"]["hits"]
     ]
