@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from normality import squash_spaces
 
 from yente import settings
-from yente.data import get_catalog
+from yente.data import get_catalog, refresh_catalog
 from yente.data.common import (
     Algorithm,
     AlgorithmResponse,
@@ -89,12 +89,20 @@ async def readyz(
 )
 async def catalog(
     provider: SearchProvider = Depends(get_provider),
+    force_refresh: bool = Query(
+        False, title="Force catalog refresh before returning it"
+    ),
 ) -> DataCatalogModel:
     """Return the service manifest, which includes a list of all indexed datasets.
 
     The manifest is the configuration file of the yente service. It specifies what
     data sources are included, and how often they should be loaded.
+
     """
+
+    if force_refresh:
+        await refresh_catalog()
+
     catalog = await get_catalog()
     await sync_dataset_versions(provider, catalog)
     model = DataCatalogModel(datasets=[], current=[], outdated=[])
