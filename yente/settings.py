@@ -121,6 +121,9 @@ CRONTAB = env_str("YENTE_CRONTAB", random_cron())
 # Whether to automatically reindex the data in the background of the API process:
 AUTO_REINDEX = as_bool(env_str("YENTE_AUTO_REINDEX", "true"))
 
+INDEXER_BATCH_SIZE = int(env_str("YENTE_INDEXER_BATCH_SIZE", "1000"))
+INDEXER_REFRESH_INDEX_EVERY = int(env_str("YENTE_INDEXER_REFRESH_INDEX_EVERY", str(INDEXER_BATCH_SIZE * 50)))
+
 # Fetch the entire bulk data file before indexing into the search index:
 STREAM_LOAD = as_bool(env_str("YENTE_STREAM_LOAD", "true"))
 # this would be cached here:

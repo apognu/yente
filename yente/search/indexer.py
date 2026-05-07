@@ -51,7 +51,7 @@ async def iter_entity_docs(
     idx = 0
     ops: Dict[str, int] = {"ADD": 0, "DEL": 0, "MOD": 0}
     async for data in updater.load():
-        if idx % 1000 == 0 and idx > 0:
+        if idx % settings.INDEXER_BATCH_SIZE == 0 and idx > 0:
             log.info("Index: %d entities..." % idx, index=index)
         op_code = data["op"]
         idx += 1
@@ -202,7 +202,7 @@ async def index_entities(
                 idx += 1
                 # Refresh the lock every 50,000 documents. Should be enough not to
                 # lose the lock, expiration time is lock.LOCK_EXPIRATION_TIME (currently 10 minutes)
-                if idx % 50000 == 0:
+                if idx % settings.INDEXER_REFRESH_INDEX_EVERY == 0:
                     lock_refreshed = await refresh_lock(provider, lock_session)
                     if not lock_refreshed:
                         raise YenteIndexError(
