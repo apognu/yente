@@ -78,11 +78,12 @@ def build_entity_action(
 
 
 async def iter_entity_docs(
-    updater: DatasetUpdater, index: str
+    updater: DatasetUpdater, index: str, limit: int | None = None
 ) -> AsyncGenerator[dict[str, Any], None]:
     dataset = updater.dataset
     datasets = set(dataset.dataset_names)
     idx = 0
+    indexed = 0
     ops: dict[str, int] = {"ADD": 0, "DEL": 0, "MOD": 0}
     async for data in updater.load():
         if idx % 1000 == 0 and idx > 0:
@@ -93,6 +94,12 @@ async def iter_entity_docs(
         action = build_entity_action(index, op_code, data["entity"], datasets, dataset)
         if action is not None:
             yield action
+            indexed += 1
+            # Test mode: stop early. Leaving the loop closes the underlying data
+            # stream, which also skips the checksum verification of the source.
+            if limit is not None and indexed >= limit:
+                log.warning("Entity limit reached, stopping", index=index, limit=limit)
+                break
     log.info(
         f"Indexed {idx} entities",
         added=ops["ADD"],
@@ -155,7 +162,11 @@ async def get_index_version(provider: SearchProvider, dataset: Dataset) -> str |
 
 
 async def index_entities(
-    provider: SearchProvider, dataset: Dataset, force: bool, lock_session: LockSession
+    provider: SearchProvider,
+    dataset: Dataset,
+    force: bool,
+    lock_session: LockSession,
+    limit: int | None = None,
 ) -> None:
     """Index entities in a particular dataset, with versioning of the index."""
     alias = settings.ENTITY_INDEX
@@ -174,6 +185,7 @@ async def index_entities(
         incremental=updater.is_incremental,
         # delta_urls=updater.delta_urls,
         force=force,
+        limit=limit,
     )
     next_index = build_index_name(dataset.name, updater.target_version)
     if not force and await provider.exists_index_alias(alias, next_index):
@@ -181,6 +193,7 @@ async def index_entities(
         return
 
     is_partial_reindex = updater.is_incremental and not force
+    limit_note = f" (test mode, limited to {limit} entities)" if limit else ""
 
     await audit_log.log_audit_message(
         provider,
@@ -188,7 +201,7 @@ async def index_entities(
         index=next_index,
         dataset=dataset.name,
         dataset_version=updater.target_version,
-        message=f"{'Incremental' if is_partial_reindex else 'Full'} reindex of {dataset.name} to {next_index} started",
+        message=f"{'Incremental' if is_partial_reindex else 'Full'} reindex of {dataset.name} to {next_index} started{limit_note}",
     )
 
     if is_partial_reindex:
@@ -205,7 +218,7 @@ async def index_entities(
         )
 
     try:
-        docs = iter_entity_docs(updater, next_index)
+        docs = iter_entity_docs(updater, next_index, limit=limit)
 
         # Little wrapper to refresh the lock every now and then
         async def refresh_lock_iterator(
@@ -231,7 +244,7 @@ async def index_entities(
             index=next_index,
             dataset=dataset.name,
             dataset_version=updater.target_version,
-            message=f"{'Incremental' if is_partial_reindex else 'Full'} reindex of {dataset.name} to {next_index} completed",
+            message=f"{'Incremental' if is_partial_reindex else 'Full'} reindex of {dataset.name} to {next_index} completed{limit_note}",
         )
 
     except Exception as exc:
@@ -259,7 +272,7 @@ async def index_entities(
             # indexing failed
             log.warning("Retrying with full reindex", dataset=dataset.name)
             return await index_entities(
-                provider, dataset, force=True, lock_session=lock_session
+                provider, dataset, force=True, lock_session=lock_session, limit=limit
             )
         raise
 
@@ -291,6 +304,12 @@ async def index_entities(
         message=f"Alias {alias} prefixed {dataset_prefix} now points to {next_index}",
     )
     log.info(f"Index is now aliased to: {alias}", index=next_index)
+    if limit is not None:
+        log.warning(
+            "Index may be truncated by --limit, run 'reindex --force' to load full data",
+            index=next_index,
+            limit=limit,
+        )
     # Also refreshed periodically by update_metrics in a cron — calling it
     # here just makes the gauge reflect a fresh reindex without waiting for
     # the next cron tick.
@@ -344,7 +363,7 @@ async def delete_old_indices(provider: SearchProvider, catalog: Catalog) -> None
         await provider.delete_index(index)
 
 
-async def update_index(force: bool = False) -> None:
+async def update_index(force: bool = False, limit: int | None = None) -> None:
     """Reindex all datasets if there is a new version of their data contenst available,
     or create an initial version of the index from scratch."""
     async with with_provider() as provider:
@@ -358,7 +377,11 @@ async def update_index(force: bool = False) -> None:
             for dataset in catalog.datasets:
                 with lock:
                     await index_entities(
-                        provider, dataset, force=force, lock_session=lock_session
+                        provider,
+                        dataset,
+                        force=force,
+                        lock_session=lock_session,
+                        limit=limit,
                     )
 
             await delete_old_indices(provider, catalog)

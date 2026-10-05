@@ -46,9 +46,16 @@ def serve() -> None:
 
 @cli.command("reindex", help="Re-index the data if newer data is available")
 @click.option("-f", "--force", is_flag=True, default=False)
-def reindex(force: bool) -> None:
+@click.option(
+    "-l",
+    "--limit",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Test mode: stop after indexing N entities per dataset",
+)
+def reindex(force: bool, limit: int | None) -> None:
     configure_logging()
-    asyncio.run(update_index(force=force))
+    asyncio.run(update_index(force=force, limit=limit))
 
 
 async def _clear_index() -> None:
